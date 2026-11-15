@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'screens/admin/member_verification_screen.dart';
+import 'screens/kiosk/live_checkin_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Supabase.initialize(
     url: 'https://woiuesrsyyuuigrftxmi.supabase.co',
-    publishableKey: 'sb_publishable_-EYboa0UgiWY8mC7tmAWlg_CTn1ifaU',
+    anonKey: 'sb_publishable_-EYboa0UgiWY8mC7tmAWlg_CTn1ifaU',
   );
 
   runApp(const MuscleGymApp());
@@ -23,7 +23,11 @@ class MuscleGymApp extends StatelessWidget {
     return MaterialApp(
       title: 'The Muscles Gym Software',
       debugShowCheckedModeBanner: false,
-      home: const MemberVerificationScreen(),
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: Colors.blue,
+      ),
+      home: const LiveCheckinScreen(),
     );
   }
 }

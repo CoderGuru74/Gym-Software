@@ -432,6 +432,43 @@ class _AdminSettingsViewState extends State<AdminSettingsView> {
     );
   }
 
+  // Update a plan's Active/Inactive status in Supabase.
+  Future<void> _updatePlanStatus(MembershipPlanItem plan) async {
+    final newStatus = plan.status == 'Active' ? 'Inactive' : 'Active';
+
+    try {
+      await _supabase
+          .from('membership_plans')
+          .update({'status': newStatus})
+          .eq('id', plan.id);
+
+      if (!mounted) return;
+
+      // Close the details popup and reload the latest database records.
+      Navigator.of(context, rootNavigator: true).pop();
+      await _loadPlans();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${plan.planName} is now $newStatus.',
+          ),
+          backgroundColor:
+              newStatus == 'Active' ? Colors.green[700] : Colors.orange[800],
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not update plan status: $error'),
+          backgroundColor: Colors.red[700],
+        ),
+      );
+    }
+  }
+
   // Show the complete details when an admin taps a membership plan.
   void _showPlanDetails(MembershipPlanItem plan) {
     showDialog(
@@ -569,8 +606,29 @@ class _AdminSettingsViewState extends State<AdminSettingsView> {
             child: Text(
               'Close',
               style: GoogleFonts.inter(
-                color: const Color(0xFF0F172A),
+                color: Colors.grey[700],
                 fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => _updatePlanStatus(plan),
+            icon: Icon(
+              plan.status == 'Active'
+                  ? Icons.pause_circle_outline_rounded
+                  : Icons.check_circle_outline_rounded,
+              size: 18,
+            ),
+            label: Text(
+              plan.status == 'Active' ? 'Deactivate Plan' : 'Activate Plan',
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: plan.status == 'Active'
+                  ? Colors.orange[700]
+                  : Colors.green[700],
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
               ),
             ),
           ),
