@@ -12,17 +12,23 @@ class AdminPaymentsView extends StatefulWidget {
 class _AdminPaymentsViewState extends State<AdminPaymentsView> {
   final _supabaseService = SupabaseService();
 
-  List _payments = [];
-  List _members = [];
-  List<Map<String, dynamic>> _plans = [];
+  List<dynamic> _payments = [];
+  List<dynamic> _members = [];
+  List<dynamic> _plans = [];
 
   bool _isLoading = true;
   bool _isSavingPayment = false;
   String? _plansError;
 
+  late DateTime _selectedMonth;
+  int? _selectedDayOfMonth;
+
   @override
   void initState() {
     super.initState();
+    final now = DateTime.now();
+    _selectedMonth = DateTime(now.year, now.month, 1);
+    _selectedDayOfMonth = null;
     _fetchData();
   }
 
@@ -42,14 +48,14 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
             .order('created_at', ascending: false),
       ]);
 
-      final plansData = (results[2] as List)
+      final plansData = (results[2] as List<dynamic>)
           .map((plan) => Map<String, dynamic>.from(plan as Map))
           .toList();
 
       if (!mounted) return;
       setState(() {
-        _payments = results[0] as List;
-        _members = results[1] as List;
+        _payments = results[0] as List<dynamic>;
+        _members = results[1] as List<dynamic>;
         _plans = plansData;
         _plansError = null;
         _isLoading = false;
@@ -58,12 +64,117 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
-        _plansError = 'Unable to load payment data or active membership plans: $e';
+        _plansError =
+            'Unable to load payment data or active membership plans: $e';
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error loading payment data: $e')),
       );
     }
+  }
+
+  int _daysInMonth(DateTime month) {
+    return DateTime(month.year, month.month + 1, 0).day;
+  }
+
+  String _monthYearLabel(DateTime month) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+    return '${months[month.month - 1]} ${month.year}';
+  }
+
+  String _shortDateLabel(DateTime date) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+    return '${date.day.toString().padLeft(2, '0')} ${months[date.month - 1]} ${date.year}';
+  }
+
+  /// Extracts the actual date the payment was made from the payment record.
+  DateTime? _extractPaymentCollectedDate(dynamic payment) {
+    final candidates = [
+      payment['payment_date'],
+      payment['paid_date'],
+      payment['created_at'],
+      payment['date'],
+    ];
+
+    for (final raw in candidates) {
+      if (raw == null) continue;
+      final str = raw.toString().trim();
+      if (str.isEmpty) continue;
+      final parsed = DateTime.tryParse(str);
+      if (parsed != null) return parsed.toLocal();
+    }
+
+    return null;
+  }
+
+  List<dynamic> get _filteredPayments {
+    return _payments.where((payment) {
+      final paidDate = _extractPaymentCollectedDate(payment);
+      if (paidDate == null) return false;
+
+      if (paidDate.year != _selectedMonth.year ||
+          paidDate.month != _selectedMonth.month) {
+        return false;
+      }
+
+      if (_selectedDayOfMonth != null && paidDate.day != _selectedDayOfMonth) {
+        return false;
+      }
+
+      return true;
+    }).toList();
+  }
+
+  double get _filteredTotalAmount {
+    double sum = 0;
+    for (final p in _filteredPayments) {
+      final raw = p['amount'];
+      if (raw is num) {
+        sum += raw.toDouble();
+      } else {
+        sum += double.tryParse((raw ?? '').toString()) ?? 0.0;
+      }
+    }
+    return sum;
+  }
+
+  Map<int, int> get _dailyPaymentCountsInSelectedMonth {
+    final Map<int, int> counts = {};
+    for (final payment in _payments) {
+      final paidDate = _extractPaymentCollectedDate(payment);
+      if (paidDate != null &&
+          paidDate.year == _selectedMonth.year &&
+          paidDate.month == _selectedMonth.month) {
+        counts[paidDate.day] = (counts[paidDate.day] ?? 0) + 1;
+      }
+    }
+    return counts;
   }
 
   int _planValidityDays(Map<String, dynamic> plan) {
@@ -110,8 +221,49 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
     return double.tryParse((price ?? '').toString()) ?? 0.0;
   }
 
-  // Delete Payment Confirmation Dialog
+  Map<String, dynamic> _findPlanById(String? planId) {
+    if (planId != null) {
+      for (final raw in _plans) {
+        final map = Map<String, dynamic>.from(raw as Map);
+        if (map['id']?.toString() == planId) {
+          return map;
+        }
+      }
+    }
+    return Map<String, dynamic>.from(_plans.first as Map);
+  }
+
+  Future<bool> _insertPayment({
+    required String memberName,
+    required String planName,
+    required double amount,
+    required String dueDate,
+    required String paymentDate,
+  }) async {
+    try {
+      await _supabaseService.client.from('payments').insert({
+        'member_name': memberName,
+        'plan': planName,
+        'amount': amount,
+        'due_date': dueDate,
+        'payment_date': paymentDate,
+      });
+      return true;
+    } catch (e) {
+      if (!e.toString().contains('PGRST204')) rethrow;
+      await _supabaseService.client.from('payments').insert({
+        'member_name': memberName,
+        'plan': planName,
+        'amount': amount,
+        'due_date': dueDate,
+      });
+      return false;
+    }
+  }
+
   void _showDeletePaymentDialog(Map<String, dynamic> payment) {
+    final rootMessenger = ScaffoldMessenger.of(context);
+
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -131,7 +283,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
+            onPressed: () => Navigator.of(dialogContext).pop(),
             child: const Text(
               "Cancel",
               style: TextStyle(color: Colors.grey),
@@ -146,23 +298,19 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                     .eq('id', payment['id']);
 
                 if (dialogContext.mounted) {
-                  Navigator.pop(dialogContext);
+                  Navigator.of(dialogContext).pop();
                 }
                 await _fetchData();
 
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text("Payment record deleted successfully!"),
-                    ),
-                  );
-                }
+                rootMessenger.showSnackBar(
+                  const SnackBar(
+                    content: Text("Payment record deleted successfully!"),
+                  ),
+                );
               } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("Error deleting payment: $e")),
-                  );
-                }
+                rootMessenger.showSnackBar(
+                  SnackBar(content: Text("Error deleting payment: $e")),
+                );
               }
             },
             style: ElevatedButton.styleFrom(
@@ -181,10 +329,11 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
     );
   }
 
-  // Collect payment using membership plans stored in Supabase.
   void _showCollectPaymentDialog() {
+    final rootMessenger = ScaffoldMessenger.of(context);
+
     if (_plans.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      rootMessenger.showSnackBar(
         SnackBar(
           content: Text(
             _plansError ??
@@ -195,29 +344,46 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
       return;
     }
 
-    String? selectedMemberName;
-    String? selectedPlanId = _plans.first['id']?.toString();
+    final Map<String, dynamic> memberOptions = {};
+    for (int i = 0; i < _members.length; i++) {
+      final m = Map<String, dynamic>.from(_members[i] as Map);
+      final name = (m['name'] ?? '').toString().trim();
+      if (name.isEmpty) continue;
+      final key = (m['id']?.toString().trim().isNotEmpty ?? false)
+          ? m['id'].toString()
+          : '${name}_$i';
+      memberOptions[key] = m;
+    }
 
-    final selectedPlan = _plans.firstWhere(
-      (plan) => plan['id']?.toString() == selectedPlanId,
-      orElse: () => _plans.first,
-    );
+    String? selectedMemberKey;
+    final firstPlanMap = Map<String, dynamic>.from(_plans.first as Map);
+    String? selectedPlanId = firstPlanMap['id']?.toString();
 
     final amountController = TextEditingController(
-      text: _planPrice(selectedPlan).toStringAsFixed(2),
+      text: _planPrice(firstPlanMap).toStringAsFixed(2),
     );
 
-    DateTime selectedDate = DateTime.now().add(
-      Duration(days: _planValidityDays(selectedPlan)),
+    final now = DateTime.now();
+    DateTime selectedPaidDate =
+        _selectedDayOfMonth != null && _selectedDayOfMonth! <= _daysInMonth(_selectedMonth)
+            ? DateTime(_selectedMonth.year, _selectedMonth.month, _selectedDayOfMonth!)
+            : DateTime(now.year, now.month, now.day);
+    final paidDateController = TextEditingController(
+      text: _formatDate(selectedPaidDate),
+    );
+
+    DateTime selectedExpiryDate = selectedPaidDate.add(
+      Duration(days: _planValidityDays(firstPlanMap)),
     );
     final dueDateController = TextEditingController(
-      text: _formatDate(selectedDate),
+      text: _formatDate(selectedExpiryDate),
     );
 
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (stfContext, setDialogState) => AlertDialog(
           backgroundColor: const Color(0xFF1E1E24),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
@@ -237,7 +403,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   DropdownButtonFormField<String>(
-                    value: selectedMemberName,
+                    value: selectedMemberKey,
                     dropdownColor: const Color(0xFF2A2A32),
                     style: const TextStyle(color: Colors.white),
                     decoration: _inputDecoration("Select Member"),
@@ -245,20 +411,25 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                       "Choose member",
                       style: TextStyle(color: Colors.grey[400]),
                     ),
-                    items: _members.map<DropdownMenuItem<String>>((member) {
+                    items: memberOptions.entries
+                        .map<DropdownMenuItem<String>>((entry) {
+                      final member =
+                          Map<String, dynamic>.from(entry.value as Map);
                       final name = (member['name'] ?? '').toString();
                       final phone = (member['phone'] ?? '').toString();
                       return DropdownMenuItem<String>(
-                        value: name,
+                        value: entry.key,
                         child: Text(
                           phone.isEmpty ? name : '$name ($phone)',
                           overflow: TextOverflow.ellipsis,
                         ),
                       );
                     }).toList(),
-                    onChanged: (value) {
-                      setDialogState(() => selectedMemberName = value);
-                    },
+                    onChanged: _isSavingPayment
+                        ? null
+                        : (value) {
+                            setDialogState(() => selectedMemberKey = value);
+                          },
                   ),
                   const SizedBox(height: 16),
                   DropdownButtonFormField<String>(
@@ -270,10 +441,11 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                       "Choose active plan",
                       style: TextStyle(color: Colors.grey[400]),
                     ),
-                    items: _plans.map<DropdownMenuItem<String>>((plan) {
+                    items: _plans.map<DropdownMenuItem<String>>((rawPlan) {
+                      final plan = Map<String, dynamic>.from(rawPlan as Map);
                       final id = plan['id'].toString();
-                      final name = (plan['plan_name'] ?? 'Unnamed Plan')
-                          .toString();
+                      final name =
+                          (plan['plan_name'] ?? 'Unnamed Plan').toString();
                       final price = _planPrice(plan);
                       final validity = _planValidityDays(plan);
                       return DropdownMenuItem<String>(
@@ -284,23 +456,23 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                         ),
                       );
                     }).toList(),
-                    onChanged: (value) {
-                      if (value == null) return;
+                    onChanged: _isSavingPayment
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            final plan = _findPlanById(value);
 
-                      final plan = _plans.firstWhere(
-                        (item) => item['id'].toString() == value,
-                      );
-
-                      setDialogState(() {
-                        selectedPlanId = value;
-                        amountController.text =
-                            _planPrice(plan).toStringAsFixed(2);
-                        selectedDate = DateTime.now().add(
-                          Duration(days: _planValidityDays(plan)),
-                        );
-                        dueDateController.text = _formatDate(selectedDate);
-                      });
-                    },
+                            setDialogState(() {
+                              selectedPlanId = value;
+                              amountController.text =
+                                  _planPrice(plan).toStringAsFixed(2);
+                              selectedExpiryDate = selectedPaidDate.add(
+                                Duration(days: _planValidityDays(plan)),
+                              );
+                              dueDateController.text =
+                                  _formatDate(selectedExpiryDate);
+                            });
+                          },
                   ),
                   const SizedBox(height: 8),
                   Align(
@@ -316,6 +488,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                   const SizedBox(height: 16),
                   TextField(
                     controller: amountController,
+                    enabled: !_isSavingPayment,
                     keyboardType:
                         const TextInputType.numberWithOptions(decimal: true),
                     style: const TextStyle(color: Colors.white),
@@ -323,44 +496,98 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                   ),
                   const SizedBox(height: 16),
                   TextField(
+                    controller: paidDateController,
+                    readOnly: true,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration("Payment Made Date").copyWith(
+                      suffixIcon: const Icon(
+                        Icons.event_available_rounded,
+                        color: Color(0xFF38BDF8),
+                      ),
+                    ),
+                    onTap: _isSavingPayment
+                        ? null
+                        : () async {
+                            final pickedDate = await showDatePicker(
+                              context: stfContext,
+                              initialDate: selectedPaidDate,
+                              firstDate: DateTime(2020),
+                              lastDate: DateTime(2035),
+                              builder: (pickerContext, child) {
+                                return Theme(
+                                  data: ThemeData.dark().copyWith(
+                                    colorScheme: const ColorScheme.dark(
+                                      primary: Color(0xFF38BDF8),
+                                      onPrimary: Colors.black,
+                                      surface: Color(0xFF1E1E24),
+                                      onSurface: Colors.white,
+                                    ),
+                                  ),
+                                  child: child!,
+                                );
+                              },
+                            );
+
+                            if (pickedDate != null && dialogContext.mounted) {
+                              setDialogState(() {
+                                selectedPaidDate = pickedDate;
+                                paidDateController.text =
+                                    _formatDate(pickedDate);
+                                if (selectedPlanId != null) {
+                                  final plan = _findPlanById(selectedPlanId);
+                                  selectedExpiryDate = selectedPaidDate.add(
+                                    Duration(days: _planValidityDays(plan)),
+                                  );
+                                  dueDateController.text =
+                                      _formatDate(selectedExpiryDate);
+                                }
+                              });
+                            }
+                          },
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
                     controller: dueDateController,
                     readOnly: true,
                     style: const TextStyle(color: Colors.white),
-                    decoration: _inputDecoration("Due Date / Expiry Date")
-                        .copyWith(
+                    decoration:
+                        _inputDecoration("Due Date / Expiry Date").copyWith(
                       suffixIcon: const Icon(
                         Icons.calendar_month_rounded,
                         color: Color(0xFF38BDF8),
                       ),
                     ),
-                    onTap: () async {
-                      final pickedDate = await showDatePicker(
-                        context: context,
-                        initialDate: selectedDate,
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime(2035),
-                        builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.dark().copyWith(
-                              colorScheme: const ColorScheme.dark(
-                                primary: Color(0xFF38BDF8),
-                                onPrimary: Colors.black,
-                                surface: Color(0xFF1E1E24),
-                                onSurface: Colors.white,
-                              ),
-                            ),
-                            child: child!,
-                          );
-                        },
-                      );
+                    onTap: _isSavingPayment
+                        ? null
+                        : () async {
+                            final pickedDate = await showDatePicker(
+                              context: stfContext,
+                              initialDate: selectedExpiryDate,
+                              firstDate: DateTime(2020),
+                              lastDate: DateTime(2035),
+                              builder: (pickerContext, child) {
+                                return Theme(
+                                  data: ThemeData.dark().copyWith(
+                                    colorScheme: const ColorScheme.dark(
+                                      primary: Color(0xFF38BDF8),
+                                      onPrimary: Colors.black,
+                                      surface: Color(0xFF1E1E24),
+                                      onSurface: Colors.white,
+                                    ),
+                                  ),
+                                  child: child!,
+                                );
+                              },
+                            );
 
-                      if (pickedDate != null) {
-                        setDialogState(() {
-                          selectedDate = pickedDate;
-                          dueDateController.text = _formatDate(pickedDate);
-                        });
-                      }
-                    },
+                            if (pickedDate != null && dialogContext.mounted) {
+                              setDialogState(() {
+                                selectedExpiryDate = pickedDate;
+                                dueDateController.text =
+                                    _formatDate(pickedDate);
+                              });
+                            }
+                          },
                   ),
                 ],
               ),
@@ -370,7 +597,10 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
             TextButton(
               onPressed: _isSavingPayment
                   ? null
-                  : () => Navigator.pop(dialogContext),
+                  : () {
+                      FocusManager.instance.primaryFocus?.unfocus();
+                      Navigator.of(dialogContext).pop();
+                    },
               child: const Text(
                 "Cancel",
                 style: TextStyle(color: Colors.grey),
@@ -380,9 +610,9 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
               onPressed: _isSavingPayment
                   ? null
                   : () async {
-                      if (selectedMemberName == null ||
-                          selectedMemberName!.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                      if (selectedMemberKey == null ||
+                          !memberOptions.containsKey(selectedMemberKey)) {
+                        rootMessenger.showSnackBar(
                           const SnackBar(
                             content: Text('Please select a member.'),
                           ),
@@ -390,10 +620,16 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                         return;
                       }
 
+                      final selectedMember = Map<String, dynamic>.from(
+                        memberOptions[selectedMemberKey] as Map,
+                      );
+                      final selectedMemberName =
+                          (selectedMember['name'] ?? '').toString().trim();
+
                       final amountNum =
                           double.tryParse(amountController.text.trim());
                       if (amountNum == null || amountNum <= 0) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        rootMessenger.showSnackBar(
                           const SnackBar(
                             content: Text('Please enter a valid amount.'),
                           ),
@@ -403,44 +639,49 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
 
                       if (selectedPlanId == null) return;
 
-                      final plan = _plans.firstWhere(
-                        (item) => item['id'].toString() == selectedPlanId,
-                      );
+                      final plan = _findPlanById(selectedPlanId);
                       final planName =
                           (plan['plan_name'] ?? 'Unnamed Plan').toString();
 
                       setDialogState(() => _isSavingPayment = true);
                       try {
-                        await _supabaseService.client.from('payments').insert({
-                          'member_name': selectedMemberName,
-                          'plan': planName,
-                          'amount': amountNum,
-                          'due_date': dueDateController.text.trim(),
-                        });
+                        final savedWithPaymentDate = await _insertPayment(
+                          memberName: selectedMemberName,
+                          planName: planName,
+                          amount: amountNum,
+                          dueDate: dueDateController.text.trim(),
+                          paymentDate: paidDateController.text.trim(),
+                        );
+
+                        FocusManager.instance.primaryFocus?.unfocus();
 
                         if (dialogContext.mounted) {
-                          Navigator.pop(dialogContext);
+                          Navigator.of(dialogContext).pop();
                         }
+
                         await _fetchData();
 
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                "Payment collected and saved successfully!",
-                              ),
+                        rootMessenger.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              savedWithPaymentDate
+                                  ? "Payment collected and saved for ${paidDateController.text.trim()}!"
+                                  : "Payment saved! Add a 'payment_date' (date) column in Supabase payments table so each payment stays on its exact paid date.",
                             ),
-                          );
-                        }
+                            backgroundColor:
+                                savedWithPaymentDate ? Colors.green : Colors.orange,
+                          ),
+                        );
                       } catch (e) {
-                        setDialogState(() => _isSavingPayment = false);
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text("Error saving payment: $e"),
-                            ),
-                          );
+                        if (dialogContext.mounted) {
+                          setDialogState(() => _isSavingPayment = false);
                         }
+                        rootMessenger.showSnackBar(
+                          SnackBar(
+                            content: Text("Error saving payment: $e"),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
                       }
                     },
               style: ElevatedButton.styleFrom(
@@ -470,9 +711,14 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
         ),
       ),
     ).then((_) {
-      amountController.dispose();
-      dueDateController.dispose();
-      if (mounted) setState(() => _isSavingPayment = false);
+      if (mounted) {
+        setState(() => _isSavingPayment = false);
+      }
+      Future.delayed(const Duration(milliseconds: 350), () {
+        amountController.dispose();
+        paidDateController.dispose();
+        dueDateController.dispose();
+      });
     });
   }
 
@@ -500,12 +746,19 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
   @override
   Widget build(BuildContext context) {
     const primaryColor = Color(0xFF0F172A);
+    final totalDays = _daysInMonth(_selectedMonth);
+    final dailyCounts = _dailyPaymentCountsInSelectedMonth;
+    final visiblePayments = _filteredPayments;
+    final today = DateTime.now();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 12,
           children: [
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -519,7 +772,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                   ),
                 ),
                 Text(
-                  "Track member subscriptions, dues, and record new payments",
+                  "Select any month or day below to see who made a payment on that date",
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     color: Colors.grey[500],
@@ -528,6 +781,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
               ],
             ),
             Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 IconButton(
                   onPressed: _fetchData,
@@ -558,7 +812,221 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
             ),
           ],
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: () {
+                            setState(() {
+                              _selectedMonth = DateTime(
+                                _selectedMonth.year,
+                                _selectedMonth.month - 1,
+                                1,
+                              );
+                              _selectedDayOfMonth = null;
+                            });
+                          },
+                          icon: const Icon(
+                            Icons.chevron_left_rounded,
+                            size: 20,
+                            color: primaryColor,
+                          ),
+                          tooltip: "Previous Month",
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          constraints: const BoxConstraints(),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.calendar_month_rounded,
+                                size: 15,
+                                color: primaryColor,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _monthYearLabel(_selectedMonth),
+                                style: GoogleFonts.inter(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: primaryColor,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () {
+                            setState(() {
+                              _selectedMonth = DateTime(
+                                _selectedMonth.year,
+                                _selectedMonth.month + 1,
+                                1,
+                              );
+                              _selectedDayOfMonth = null;
+                            });
+                          },
+                          icon: const Icon(
+                            Icons.chevron_right_rounded,
+                            size: 20,
+                            color: primaryColor,
+                          ),
+                          tooltip: "Next Month",
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          constraints: const BoxConstraints(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  ChoiceChip(
+                    label: Text(
+                      "All Days (${_monthYearLabel(_selectedMonth)})",
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: _selectedDayOfMonth == null
+                            ? Colors.white
+                            : primaryColor,
+                      ),
+                    ),
+                    selected: _selectedDayOfMonth == null,
+                    selectedColor: primaryColor,
+                    backgroundColor: const Color(0xFFF1F5F9),
+                    onSelected: (_) {
+                      setState(() => _selectedDayOfMonth = null);
+                    },
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFECFDF5),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFA7F3D0)),
+                    ),
+                    child: Text(
+                      "${visiblePayments.length} ${visiblePayments.length == 1 ? 'Payment' : 'Payments'}  •  ₹ ${_filteredTotalAmount.toStringAsFixed(0)}",
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF047857),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 44,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: totalDays,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (context, idx) {
+                    final day = idx + 1;
+                    final isSelected = _selectedDayOfMonth == day;
+                    final count = dailyCounts[day] ?? 0;
+                    final isToday = today.year == _selectedMonth.year &&
+                        today.month == _selectedMonth.month &&
+                        today.day == day;
+
+                    return InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        setState(() {
+                          _selectedDayOfMonth = isSelected ? null : day;
+                        });
+                      },
+                      child: Container(
+                        width: 44,
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? primaryColor
+                              : count > 0
+                                  ? const Color(0xFFE0F2FE)
+                                  : const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: isSelected
+                                ? primaryColor
+                                : isToday
+                                    ? const Color(0xFF0284C7)
+                                    : count > 0
+                                        ? const Color(0xFF7DD3FC)
+                                        : const Color(0xFFE2E8F0),
+                            width: isToday ? 1.5 : 1,
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              day.toString().padLeft(2, '0'),
+                              style: GoogleFonts.inter(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: isSelected
+                                    ? Colors.white
+                                    : count > 0
+                                        ? const Color(0xFF0369A1)
+                                        : const Color(0xFF475569),
+                              ),
+                            ),
+                            if (count > 0)
+                              Container(
+                                margin: const EdgeInsets.only(top: 2),
+                                width: 5,
+                                height: 5,
+                                decoration: BoxDecoration(
+                                  color: isSelected
+                                      ? const Color(0xFF38BDF8)
+                                      : const Color(0xFF10B981),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
         Expanded(
           child: Container(
             padding: const EdgeInsets.all(24),
@@ -579,7 +1047,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                       color: Color(0xFF38BDF8),
                     ),
                   )
-                : _payments.isEmpty
+                : visiblePayments.isEmpty
                     ? Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -591,7 +1059,9 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              "No payment transactions recorded yet.",
+                              _selectedDayOfMonth != null
+                                  ? "No payments recorded on ${_selectedDayOfMonth.toString().padLeft(2, '0')} ${_monthYearLabel(_selectedMonth)}."
+                                  : "No payment transactions recorded in ${_monthYearLabel(_selectedMonth)}.",
                               style: GoogleFonts.inter(
                                 color: Colors.grey[600],
                                 fontSize: 15,
@@ -600,7 +1070,7 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              "Click 'Collect Payment' above to record your first transaction.",
+                              "Select another day above or click 'Collect Payment' to record one.",
                               style: GoogleFonts.inter(
                                 color: Colors.grey[400],
                                 fontSize: 13,
@@ -627,6 +1097,17 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                                   flex: 2,
                                   child: Text(
                                     "Member Name",
+                                    style: GoogleFonts.inter(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.grey[700],
+                                    ),
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 2,
+                                  child: Text(
+                                    "Paid On",
                                     style: GoogleFonts.inter(
                                       fontSize: 12,
                                       fontWeight: FontWeight.bold,
@@ -684,9 +1165,15 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                           const SizedBox(height: 8),
                           Expanded(
                             child: ListView.builder(
-                              itemCount: _payments.length,
+                              itemCount: visiblePayments.length,
                               itemBuilder: (context, index) {
-                                final payment = _payments[index];
+                                final payment = visiblePayments[index];
+                                final paidDate =
+                                    _extractPaymentCollectedDate(payment);
+                                final paidDateStr = paidDate != null
+                                    ? _shortDateLabel(paidDate)
+                                    : 'N/A';
+
                                 return Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 16,
@@ -710,6 +1197,17 @@ class _AdminPaymentsViewState extends State<AdminPaymentsView> {
                                             fontSize: 13,
                                             fontWeight: FontWeight.w600,
                                             color: primaryColor,
+                                          ),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        flex: 2,
+                                        child: Text(
+                                          paidDateStr,
+                                          style: GoogleFonts.inter(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w500,
+                                            color: const Color(0xFF334155),
                                           ),
                                         ),
                                       ),

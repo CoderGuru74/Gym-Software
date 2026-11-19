@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:camera/camera.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../services/supabase_service.dart';
 import 'admin_members_view.dart';
 import 'admin_attendance_view.dart';
@@ -102,10 +103,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         final daysLeft = _calculateDaysLeft(dueDate);
         
         if (daysLeft >= 0 && daysLeft <= 15) {
+          String phone = '';
+          for (var m in members) {
+            if ((m['name']?.toString().toLowerCase() ?? '') == (payment['member_name']?.toString().toLowerCase() ?? '')) {
+              phone = m['phone']?.toString() ?? '';
+              break;
+            }
+          }
+
           combinedDues.add({
             'name': payment['member_name'] ?? 'Unknown',
             'plan': payment['plan'] ?? 'Gold Plan',
             'expiry_date': dueDate ?? '',
+            'phone': phone,
           });
         }
       }
@@ -120,6 +130,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               'name': member['name'] ?? 'Unknown',
               'plan': member['plan'] ?? 'Gold Plan',
               'expiry_date': expiryDate ?? '',
+              'phone': member['phone']?.toString() ?? '',
             });
           }
         }
@@ -154,6 +165,27 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       context: context,
       builder: (context) => const FaceAttendanceScannerDialog(),
     );
+  }
+
+  Future<void> _sendWhatsAppReminder(String name, String plan, String expiryDate, String phone) async {
+    final cleanPhone = phone.replaceAll(RegExp(r'\D'), '');
+    final message = Uri.encodeComponent(
+      "Hello $name, this is a friendly reminder from The Muscles Gym that your $plan membership is expiring on $expiryDate. Please renew your plan to continue your fitness journey. Thank you!"
+    );
+    
+    final url = cleanPhone.isNotEmpty 
+        ? "https://wa.me/$cleanPhone?text=$message"
+        : "https://wa.me/?text=$message";
+
+    if (await canLaunchUrl(Uri.parse(url))) {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Could not launch WhatsApp reminder.")),
+        );
+      }
+    }
   }
 
   final List _navItems = [
@@ -244,17 +276,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         ),
                         Row(
                           children: [
-                            ElevatedButton.icon(
-                              onPressed: _openFaceScannerDialog,
-                              icon: const Icon(Icons.face_retouching_natural_rounded, size: 16, color: Colors.black),
-                              label: const Text("Face Verification Scan", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF38BDF8),
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
                             IconButton(
                               onPressed: _fetchDashboardData,
                               icon: const Icon(Icons.refresh_rounded, color: Color(0xFF0F172A)),
@@ -326,18 +347,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                           ),
                         ],
                       ),
-                      if (!isCompact)
-                        ElevatedButton.icon(
-                          onPressed: _openFaceScannerDialog,
-                          icon: const Icon(Icons.camera_alt_rounded, size: 16),
-                          label: const Text("Open Face Attendance Scanner"),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF0F172A),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          ),
+                      ElevatedButton.icon(
+                        onPressed: _openFaceScannerDialog,
+                        icon: const Icon(Icons.face_retouching_natural_rounded, size: 16, color: Colors.black),
+                        label: const Text("Face Verification Scan", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF38BDF8),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         ),
+                      ),
                     ],
                   ),
                 ),
@@ -501,6 +520,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 Expanded(flex: 2, child: Text("Name", style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey[600]))),
                 Expanded(flex: 2, child: Text("Plan", style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey[600]))),
                 Expanded(flex: 2, child: Text("Due date", style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey[600]))),
+                const SizedBox(width: 80, child: Text("Action", textAlign: TextAlign.center, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey))),
               ],
             ),
           ),
@@ -513,13 +533,33 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     itemBuilder: (context, index) {
                       final member = _duePayments[index];
                       return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                         decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.grey[100]!))),
                         child: Row(
                           children: [
                             Expanded(flex: 2, child: Text(member['name'] ?? '', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF0F172A)))),
                             Expanded(flex: 2, child: Text(member['plan'] ?? 'Gold Plan', style: GoogleFonts.inter(fontSize: 12, color: Colors.grey[600]))),
                             Expanded(flex: 2, child: Text(member['expiry_date'] ?? '', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.amber[800]))),
+                            SizedBox(
+                              width: 80,
+                              child: TextButton.icon(
+                                onPressed: () => _sendWhatsAppReminder(
+                                  member['name'] ?? '',
+                                  member['plan'] ?? 'Gold Plan',
+                                  member['expiry_date'] ?? '',
+                                  member['phone'] ?? '',
+                                ),
+                                icon: const Icon(Icons.chat_rounded, size: 14, color: Color(0xFF10B981)),
+                                label: const Text("WhatsApp", style: TextStyle(fontSize: 10, color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
+                                style: TextButton.styleFrom(
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(80, 30),
+                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  backgroundColor: const Color(0xFF10B981).withOpacity(0.1),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       );
